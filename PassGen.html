@@ -853,15 +853,15 @@
         <h3 class="tools-title">Sicurezza e ripristino</h3>
 
         <label class="check">
-          <span>Blocco PIN <small>Protezione locale quando apri PassGen</small></span>
-          <input type="checkbox" id="pinEnabled">
+          <span>Password app <small>Chiedi una password quando apri PassGen</small></span>
+          <input type="checkbox" id="appPasswordEnabled">
         </label>
 
         <div class="tool-panel active" style="display:block;">
           <div class="tool-row">
             <div class="tool-field">
-              <label for="pinCode">PIN locale</label>
-              <input type="password" id="pinCode" maxlength="8" placeholder="4-8 cifre" inputmode="numeric">
+              <label for="pendingAppPassword">Stato password</label>
+              <input type="text" id="pendingAppPassword" value="Non confermata" readonly>
             </div>
             <div class="tool-field">
               <label for="clearAfterCopy">Cancella dopo copia</label>
@@ -872,8 +872,10 @@
               </select>
             </div>
           </div>
+
+          <button class="tool-generate" id="confirmPasswordChoiceBtn">Conferma scelta password</button>
           <button class="danger-button" id="resetSettingsBtn">Ripristina impostazioni iniziali</button>
-          <div class="settings-note">Il PIN è salvato solo su questo dispositivo. Non è Face ID vero, ma blocca l’apertura immediata dell’app.</div>
+          <div class="settings-note">La password è salvata solo su questo dispositivo. Se la attivi, al prossimo riavvio ti verrà chiesto di crearla e ripeterla.</div>
         </div>
       </div>
 
@@ -1471,8 +1473,6 @@
       "useLower",
       "useSpecial",
       "easyReadMode",
-      "pinEnabled",
-      "pinCode",
       "clearAfterCopy",
       "quickNumberCount",
       "quickNumberRepeat",
@@ -1586,45 +1586,110 @@
       location.reload();
     }
 
-    function setupPinLock() {
-      const enabled = localStorage.getItem("passgen-pinEnabled") === "1";
-      const pin = localStorage.getItem("passgen-pinCode") || "";
+    async function hashText(text) {
+      const data = new TextEncoder().encode(text);
+      const digest = await crypto.subtle.digest("SHA-256", data);
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function showLockScreen(title, message, mode) {
       const lock = document.getElementById("pinLock");
-
-      if (!lock || !enabled || pin.length < 4) return;
-
-      lock.classList.add("show");
-
+      const titleEl = lock.querySelector("h2");
+      const messageEl = lock.querySelector("p");
       const input = document.getElementById("pinUnlockInput");
       const btn = document.getElementById("pinUnlockBtn");
       const reset = document.getElementById("pinResetBtn");
       const err = document.getElementById("pinError");
 
-      function unlock() {
-        if (input.value === pin) {
+      titleEl.textContent = title;
+      messageEl.textContent = message;
+      input.value = "";
+      err.textContent = "";
+      lock.dataset.mode = mode;
+      lock.classList.add("show");
+      setTimeout(() => input.focus(), 200);
+    }
+
+    async function setupPinLock() {
+      const setupPending = localStorage.getItem("passgen-passwordSetupPending") === "1";
+      const storedHash = localStorage.getItem("passgen-appPasswordHash") || "";
+      const lock = document.getElementById("pinLock");
+      const input = document.getElementById("pinUnlockInput");
+      const btn = document.getElementById("pinUnlockBtn");
+      const reset = document.getElementById("pinResetBtn");
+      const err = document.getElementById("pinError");
+
+      if (!lock) return;
+
+      let firstPassword = "";
+
+      async function handlePasswordAction() {
+        const mode = lock.dataset.mode;
+        const value = input.value;
+
+        if (mode === "setup1") {
+          if (value.length < 4) {
+            err.textContent = "Usa almeno 4 caratteri.";
+            input.value = "";
+            return;
+          }
+
+          firstPassword = value;
+          showLockScreen("Crea password", "Ripeti la nuova password per confermare.", "setup2");
+          return;
+        }
+
+        if (mode === "setup2") {
+          if (value !== firstPassword) {
+            err.textContent = "Le password non coincidono. Riprova.";
+            firstPassword = "";
+            showLockScreen("Crea password", "Inserisci la nuova password per PassGen.", "setup1");
+            return;
+          }
+
+          const hash = await hashText(value);
+          localStorage.setItem("passgen-appPasswordHash", hash);
+          localStorage.setItem("passgen-appPasswordEnabled", "1");
+          localStorage.removeItem("passgen-passwordSetupPending");
           lock.classList.remove("show");
           input.value = "";
-          err.textContent = "";
-        } else {
-          err.textContent = "PIN non corretto.";
-          input.value = "";
+          return;
+        }
+
+        if (mode === "unlock") {
+          const hash = await hashText(value);
+          if (hash === storedHash) {
+            lock.classList.remove("show");
+            input.value = "";
+            err.textContent = "";
+          } else {
+            err.textContent = "Password non corretta.";
+            input.value = "";
+          }
         }
       }
 
-      btn.addEventListener("click", unlock);
+      btn.addEventListener("click", handlePasswordAction);
       input.addEventListener("keydown", event => {
-        if (event.key === "Enter") unlock();
+        if (event.key === "Enter") handlePasswordAction();
       });
 
       reset.addEventListener("click", () => {
-        if (!confirm("Vuoi disattivare il PIN e ripristinare le impostazioni locali?")) return;
+        if (!confirm("Vuoi eliminare la password e ripristinare tutte le impostazioni locali?")) return;
         Object.keys(localStorage).forEach(key => {
           if (key.startsWith("passgen-")) localStorage.removeItem(key);
         });
         location.reload();
       });
 
-      setTimeout(() => input.focus(), 200);
+      if (setupPending) {
+        showLockScreen("Crea password", "Inserisci la nuova password per PassGen.", "setup1");
+        return;
+      }
+
+      if (storedHash) {
+        showLockScreen("PassGen", "Inserisci la password per aprire l’app.", "unlock");
+      }
     }
 
     function attachExtraSettingsEvents() {
@@ -1648,25 +1713,86 @@
         });
       });
 
-      const pinCode = document.getElementById("pinCode");
-      if (pinCode) {
-        pinCode.addEventListener("input", () => {
-          pinCode.value = pinCode.value.replace(/\D/g, "").slice(0, 8);
-          saveFieldValue("pinCode");
+      const passwordToggle = document.getElementById("appPasswordEnabled");
+      const statusField = document.getElementById("pendingAppPassword");
+      const confirmBtn = document.getElementById("confirmPasswordChoiceBtn");
+
+      function refreshPasswordStatus() {
+        if (!passwordToggle || !statusField) return;
+
+        const hasPassword = !!localStorage.getItem("passgen-appPasswordHash");
+        const pendingSetup = localStorage.getItem("passgen-passwordSetupPending") === "1";
+
+        if (hasPassword) {
+          passwordToggle.checked = true;
+          statusField.value = "Attiva";
+        } else if (pendingSetup) {
+          passwordToggle.checked = true;
+          statusField.value = "Da creare al prossimo riavvio";
+        } else {
+          passwordToggle.checked = false;
+          statusField.value = "Disattivata";
+        }
+      }
+
+      refreshPasswordStatus();
+
+      if (passwordToggle) {
+        passwordToggle.addEventListener("change", () => {
+          if (statusField) {
+            statusField.value = passwordToggle.checked ? "Da confermare" : "Disattivazione da confermare";
+          }
         });
       }
 
-      const pinEnabled = document.getElementById("pinEnabled");
-      if (pinEnabled) {
-        pinEnabled.addEventListener("change", () => {
-          if (pinEnabled.checked) {
-            const pin = document.getElementById("pinCode").value;
-            if (!/^\d{4,8}$/.test(pin)) {
-              alert("Prima inserisci un PIN da 4 a 8 cifre.");
-              pinEnabled.checked = false;
+      if (confirmBtn && passwordToggle) {
+        confirmBtn.addEventListener("click", async () => {
+          if (passwordToggle.checked) {
+            const hasPassword = !!localStorage.getItem("passgen-appPasswordHash");
+
+            if (hasPassword) {
+              alert("La password app è già attiva.");
+              refreshPasswordStatus();
+              return;
+            }
+
+            localStorage.setItem("passgen-passwordSetupPending", "1");
+            localStorage.setItem("passgen-appPasswordEnabled", "1");
+            refreshPasswordStatus();
+            alert("Confermato. Alla prossima apertura ti verrà chiesto di creare la password e ripeterla.");
+            return;
+          }
+
+          const currentHash = localStorage.getItem("passgen-appPasswordHash");
+          const pendingSetup = localStorage.getItem("passgen-passwordSetupPending") === "1";
+
+          if (currentHash) {
+            const typed = prompt("Inserisci la password attuale per disattivarla:");
+            if (typed === null) {
+              refreshPasswordStatus();
+              return;
+            }
+
+            const typedHash = await hashText(typed);
+            if (typedHash !== currentHash) {
+              alert("Password non corretta. La protezione resta attiva.");
+              refreshPasswordStatus();
+              return;
             }
           }
-          saveFieldValue("pinEnabled");
+
+          if (pendingSetup && !currentHash) {
+            if (!confirm("Vuoi annullare la creazione della password app?")) {
+              refreshPasswordStatus();
+              return;
+            }
+          }
+
+          localStorage.removeItem("passgen-appPasswordHash");
+          localStorage.removeItem("passgen-passwordSetupPending");
+          localStorage.setItem("passgen-appPasswordEnabled", "0");
+          refreshPasswordStatus();
+          alert("Password app disattivata.");
         });
       }
     }
@@ -1687,10 +1813,10 @@
   <div class="pin-lock" id="pinLock">
     <div class="pin-card">
       <h2>PassGen</h2>
-      <p>Inserisci il PIN locale per aprire l’app.</p>
-      <input type="password" id="pinUnlockInput" maxlength="8" inputmode="numeric" autocomplete="off">
+      <p>Inserisci la password per aprire l’app.</p>
+      <input type="password" id="pinUnlockInput" autocomplete="current-password">
       <button id="pinUnlockBtn">Sblocca</button>
-      <button class="small-action" id="pinResetBtn">Ho dimenticato il PIN</button>
+      <button class="small-action" id="pinResetBtn">Ho dimenticato la password</button>
       <div class="pin-error" id="pinError"></div>
     </div>
   </div>
